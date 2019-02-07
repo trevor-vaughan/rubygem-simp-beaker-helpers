@@ -5,6 +5,7 @@ module Simp; end
 module Simp::BeakerHelpers
   include BeakerPuppet
 
+  require 'simp/beaker_helpers/constants'
   require 'simp/beaker_helpers/version'
   require 'simp/beaker_helpers/inspec'
   require 'simp/beaker_helpers/ssg'
@@ -14,12 +15,6 @@ module Simp::BeakerHelpers
     t = Time.new.strftime("%Y%m%d")
     "simp-beaker-helpers-#{t}-#{$$}-#{rand(0x100000000).to_s(36)}.tmp"
   end
-
-  # This is the *oldest* version that the latest release of SIMP supports
-  #
-  # This is done so that we know if some new thing that we're using breaks the
-  # oldest system that we support.
-  DEFAULT_PUPPET_AGENT_VERSION = '1.10.4'
 
   # We can't cache this because it may change during a run
   def fips_enabled(sut)
@@ -263,6 +258,8 @@ module Simp::BeakerHelpers
       if pupmods_in_fixtures_yml.include?('fips')
         copy_fixture_modules_to(sut)
       else
+        fail('Offline Error: Please add the simp/fips module to your .fixtures.yml and try again') unless ONLINE
+
         # If we don't already have the simp-fips module installed
         #
         # Use the simp-fips Puppet module to set FIPS up properly:
@@ -372,11 +369,26 @@ module Simp::BeakerHelpers
     end
   end
 
+  def redhat_errata( sut )
+    enable_yum_repos_on(sut)
+
+    # net-tools required for netstat utility being used by be_listening
+    if fact_on(sut, 'operatingsystemmajrelease') == '7'
+      pp = <<-EOS
+        package { 'net-tools': ensure => installed }
+      EOS
+      apply_manifest_on(sut, pp, :catch_failures => false)
+    end
+
+    # Clean up YUM prior to starting our test runs.
+    on(sut, 'yum clean all')
+  end
+
   def linux_errata( sut )
     # We need to be able to flip between server and client without issue
     on sut, 'puppet resource group puppet gid=52'
     on sut, 'puppet resource user puppet comment="Puppet" gid="52" uid="52" home="/var/lib/puppet" managehome=true'
-    
+
     # This may not exist in docker so just skip the whole thing
     if sut.file_exist?('/etc/ssh')
       # SIMP uses a central ssh key location so we prep that spot in case we
@@ -409,7 +421,7 @@ module Simp::BeakerHelpers
         on(sut, %{if [ -f "#{src_file}" ]; then cp -a -f "#{src_file}" "#{tgt_file}" && chmod 644 "#{tgt_file}"; fi}, :silent => true)
       end
     end
-    
+
     # SIMP uses structured facts, therefore stringify_facts must be disabled
     unless ENV['BEAKER_stringify_facts'] == 'yes'
       on sut, 'puppet config set stringify_facts false'
@@ -423,20 +435,7 @@ module Simp::BeakerHelpers
       configure_type_defaults_on(sut)
     end
 
-    if fact_on(sut, 'osfamily') == 'RedHat'
-      enable_yum_repos_on(sut)
-
-      # net-tools required for netstat utility being used by be_listening
-      if fact_on(sut, 'operatingsystemmajrelease') == '7'
-        pp = <<-EOS
-          package { 'net-tools': ensure => installed }
-        EOS
-        apply_manifest_on(sut, pp, :catch_failures => false)
-      end
-
-      # Clean up YUM prior to starting our test runs.
-      on(sut, 'yum clean all')
-    end
+    redhat_errata(sut) if fact_on(sut, 'osfamily') == 'RedHat'
   end
 
   # Apply known OS fixes we need to run Beaker on each SUT
